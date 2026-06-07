@@ -1,0 +1,15 @@
+{
+  "name": "nicola-agent-bridge",
+  "version": "0.1.0",
+  "description": "把 Telegram 群消息桥接到本机 claude CLI，让 cc 在群里以完整开发能力工作",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "start": "node --env-file=.env src/index.js"
+  },
+  "dependencies": {
+    "grammy": "^1.30.0",
+    "https-proxy-agent": "^9.0.0",
+    "socks-proxy-agent": "^10.0.0"
+  }
+}
