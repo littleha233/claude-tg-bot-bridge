@@ -2,5 +2,7 @@ node_modules/
 .env
 data/sessions.json
 data/workdirs.json
+data/models.json
 data/bridge.log
+data/downloads/
 *.log

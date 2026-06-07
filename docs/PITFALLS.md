@@ -105,9 +105,16 @@
 - 现象：新会话冷启动十几~几十秒，群里只有"正在输入"不明显，用户以为没反应会重复发。
 - 解决：收到消息**立刻回一条占位**（如"🐾 收到，处理中…"），出结果后删掉占位再发正文。
 
+**坑 12.5：带附件的消息，文字在 `caption` 里，不在 `text` 里。**
+- 现象：用户发一个文档/图片 + 一段 @bot 的说明，bot 完全没反应。
+- 原因：① 只监听了 `message:text`，文档消息不触发；② 附带文字在 `ctx.message.caption`，不在 `ctx.message.text`。
+- 解决：触发判断取 `msg.text ?? msg.caption`；另外监听 `message:document`/`message:photo`。
+- 处理附件：`ctx.api.getFile(file_id)` 拿到 `file_path` → 从 `https://api.telegram.org/file/bot<token>/<file_path>` **经同一个代理 agent** 下载到本机 → 把**本地绝对路径**写进给 claude 的 prompt 让它读。`.docx` 等非纯文本，claude 用 `textutil -convert txt` 等自行转换（claude 有 bash）。
+
 **其它实现细节：**
 - Telegram 单条消息上限 4096 字，长回复要**按行分段**发送。
 - 每个 chat 维护独立 `session_id`（持久化到文件），用 `--resume` 续接；同一会话加**忙碌锁**避免并发 resume 竞争（不过 grammy 默认是顺序处理 update 的）。
+- 每个 chat 可独立切**工作目录**和**模型**（持久化到文件）。模型用别名 `opus/sonnet/haiku` 会自动指向各档最新模型，模型更新时通常无需手动改。
 
 ---
 

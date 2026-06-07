@@ -24,6 +24,7 @@ if (config.proxyUrl) {
   childEnv.http_proxy = config.proxyUrl;
 }
 const WORKDIRS_FILE = join(__dirname, '..', 'data', 'workdirs.json');
+const MODELS_FILE = join(__dirname, '..', 'data', 'models.json');
 
 // 简单的 JSON 持久化小工具
 function loadJson(file) {
@@ -46,6 +47,8 @@ function saveJson(file, obj) {
 const sessions = loadJson(SESSIONS_FILE);
 // chatId -> 工作目录：每个群可单独切换项目
 const workdirs = loadJson(WORKDIRS_FILE);
+// chatId -> 模型：每个群可单独切换模型（别名或完整 id）
+const models = loadJson(MODELS_FILE);
 
 export function resetSession(chatId) {
   delete sessions[String(chatId)];
@@ -54,6 +57,15 @@ export function resetSession(chatId) {
 
 export function getWorkDir(chatId) {
   return workdirs[String(chatId)] || config.workDir;
+}
+
+export function getModel(chatId) {
+  return models[String(chatId)] || config.model;
+}
+
+export function setModel(chatId, model) {
+  models[String(chatId)] = model.trim();
+  saveJson(MODELS_FILE, models);
 }
 
 // 把开头的 ~ 展开为家目录
@@ -101,7 +113,7 @@ export function askClaude(chatId, prompt) {
       '--permission-mode',
       config.permissionMode,
       '--model',
-      config.model,
+      getModel(chatId),
     ];
     const prev = sessions[key];
     if (prev) args.push('--resume', prev);

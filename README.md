@@ -17,16 +17,18 @@ npm start            # = node --env-file=.env src/index.js
 
 ## 使用
 
-群里给 cc 发消息（三种触发方式任选）：
+群里给 cc 发消息（触发方式任选；文字以 `cc` 开头、@机器人、或回复机器人均可）：
 
-- `cc: 帮我看下 pet-adoption-app 的登录接口`
+- `cc: 帮我看下 pet-adoption-app 的登录接口`（`cc:` / `cc，` / `cc 空格` / `cc直接接中文` 都行）
 - `@你的机器人用户名 ...`
 - 直接**回复** cc 的某条消息
+- **发文档/图片**给 cc（在附件说明 caption 里写 `cc ...` 或 @机器人）：自动下载到本机 `data/downloads/` 后交给 cc 读取
 
 命令（统一 cc 前缀，便于将来与 Codex 等其它 bot 共处一群不冲突）：
 
 - `/ccnew` —— 开启新会话，清空上下文
 - `/ccproject <路径>` —— 切换工作目录（按 chat 记忆，自动开新会话）；不带参数则显示当前目录
+- `/ccmodel <opus|sonnet|haiku|完整id>` —— 切换模型（按 chat 记忆，不清空会话）；不带参数则显示当前
 - `/ccwhoami` —— 查看自己的 user_id 和群的 chat_id（用于配置白名单）
 - `/cchelp` —— 帮助
 
