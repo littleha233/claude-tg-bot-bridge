@@ -94,10 +94,53 @@ export function isBusy(chatId) {
   return busy.has(String(chatId));
 }
 
+// 把 claude 的一次 tool_use 渲染成一行进度（给群里看）
+function shorten(value, n) {
+  const s = String(value ?? '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return s.length <= n ? s : `${s.slice(0, n - 1)}…`;
+}
+function basename(p) {
+  return String(p ?? '').split('/').pop();
+}
+function renderTool(block) {
+  const input = block.input || {};
+  switch (block.name) {
+    case 'Bash':
+      return `🔧 ${shorten(input.command || input.description || 'bash', 120)}`;
+    case 'Read':
+      return `📖 读取 ${basename(input.file_path)}`;
+    case 'Write':
+      return `📝 写入 ${basename(input.file_path)}`;
+    case 'Edit':
+    case 'MultiEdit':
+      return `📝 编辑 ${basename(input.file_path)}`;
+    case 'NotebookEdit':
+      return `📝 编辑 ${basename(input.notebook_path)}`;
+    case 'Grep':
+      return `🔍 搜索 ${shorten(input.pattern, 60)}`;
+    case 'Glob':
+      return `🔍 查找 ${shorten(input.pattern, 60)}`;
+    case 'Task':
+      return `🤖 子任务 ${shorten(input.description, 60)}`;
+    case 'WebFetch':
+      return `🌐 ${shorten(input.url, 80)}`;
+    case 'WebSearch':
+      return `🌐 搜索 ${shorten(input.query, 60)}`;
+    case 'TodoWrite':
+      return '📋 更新待办';
+    default:
+      return `🔧 ${block.name}`;
+  }
+}
+
 /**
- * 以 headless 方式调用 claude，返回 { text, sessionId, isError }
+ * 以 headless 方式调用 claude（stream-json 流式）。
+ * onProgress(step) 在每次工具调用时回调一次，用于推送进度。
+ * 返回 { text, sessionId, isError }
  */
-export function askClaude(chatId, prompt) {
+export function askClaude(chatId, prompt, onProgress) {
   const key = String(chatId);
   return new Promise((resolve) => {
     if (busy.has(key)) {
@@ -109,7 +152,8 @@ export function askClaude(chatId, prompt) {
     const args = [
       '-p',
       '--output-format',
-      'json',
+      'stream-json',
+      '--verbose',
       '--permission-mode',
       config.permissionMode,
       '--model',
@@ -123,9 +167,45 @@ export function askClaude(chatId, prompt) {
       env: childEnv,
     });
 
-    let stdout = '';
     let stderr = '';
-    child.stdout.on('data', (d) => (stdout += d));
+    let buffer = '';
+    let resultText = '';
+    let sessionId;
+    let isError = false;
+    let sawResult = false;
+
+    const handleEvent = (evt) => {
+      if (evt.type === 'system' && evt.subtype === 'init') {
+        if (evt.session_id) sessionId = evt.session_id;
+      } else if (evt.type === 'assistant' && Array.isArray(evt.message?.content)) {
+        for (const block of evt.message.content) {
+          if (block.type === 'tool_use' && onProgress) onProgress(renderTool(block));
+        }
+      } else if (evt.type === 'result') {
+        sawResult = true;
+        if (evt.session_id) sessionId = evt.session_id;
+        if (typeof evt.result === 'string') resultText = evt.result;
+        isError = !!evt.is_error;
+      }
+    };
+    const handleLine = (line) => {
+      const t = line.trim();
+      if (!t.startsWith('{')) return;
+      try {
+        handleEvent(JSON.parse(t));
+      } catch {
+        // 跳过非 JSON 行
+      }
+    };
+
+    child.stdout.on('data', (d) => {
+      buffer += d.toString();
+      let idx;
+      while ((idx = buffer.indexOf('\n')) >= 0) {
+        handleLine(buffer.slice(0, idx));
+        buffer = buffer.slice(idx + 1);
+      }
+    });
     child.stderr.on('data', (d) => (stderr += d));
 
     child.on('error', (err) => {
@@ -135,29 +215,21 @@ export function askClaude(chatId, prompt) {
 
     child.on('close', (code) => {
       busy.delete(key);
-      if (code !== 0) {
-        // resume 失败（如 session 过期）时，清掉旧 session 让用户重试
+      if (buffer.trim()) handleLine(buffer);
+      if (sessionId) {
+        sessions[key] = sessionId;
+        saveJson(SESSIONS_FILE, sessions);
+      }
+      if (!sawResult && code !== 0) {
+        // resume 失败（如 session 过期）等：清掉旧 session 让下次重来
         if (prev) resetSession(chatId);
         resolve({
-          text: `❌ claude 退出码 ${code}\n${stderr.slice(0, 1500) || stdout.slice(0, 1500)}`,
+          text: `❌ claude 退出码 ${code}\n${stderr.slice(0, 1500)}`,
           isError: true,
         });
         return;
       }
-      try {
-        const data = JSON.parse(stdout);
-        if (data.session_id) {
-          sessions[key] = data.session_id;
-          saveJson(SESSIONS_FILE, sessions);
-        }
-        const text = data.result || '(claude 返回了空内容)';
-        resolve({ text, sessionId: data.session_id, isError: !!data.is_error });
-      } catch (e) {
-        resolve({
-          text: `❌ 解析 claude 输出失败：${e.message}\n原始输出：${stdout.slice(0, 1000)}`,
-          isError: true,
-        });
-      }
+      resolve({ text: resultText || '(claude 返回了空内容)', sessionId, isError });
     });
 
     // 通过 stdin 传 prompt，避免命令行参数转义问题

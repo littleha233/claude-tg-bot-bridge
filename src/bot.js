@@ -163,7 +163,86 @@ bot.command('ccmodel', (ctx) => {
   );
 });
 
-// 跑一次 cc 请求：白名单 + 占位 + 调 claude + 回贴（文本和附件消息共用）
+// 进度面板：把 claude 的执行步骤实时编辑进同一条消息（节流 2.5s），方便监督
+class ProgressReporter {
+  constructor(ctx) {
+    this.ctx = ctx;
+    this.chatId = ctx.chat.id;
+    this.steps = [];
+    this.messageId = undefined;
+    this.lastRendered = '';
+    this.dirty = false;
+    this.timer = undefined;
+  }
+
+  async start() {
+    const initial = '🛠 cc 处理中…';
+    const msg = await this.ctx.reply(initial).catch(() => null);
+    this.messageId = msg?.message_id;
+    this.lastRendered = initial;
+    this.timer = setInterval(() => void this.flush(), 2500);
+    await this.ctx.replyWithChatAction('typing').catch(() => {});
+  }
+
+  push(step) {
+    this.steps.push(step);
+    this.dirty = true;
+  }
+
+  render() {
+    const shown = this.steps.slice(-20);
+    const omitted = this.steps.length - shown.length;
+    const lines = ['🛠 cc 处理中…'];
+    if (omitted > 0) lines.push(`…（前 ${omitted} 步略）`);
+    shown.forEach((s, i) => lines.push(`${omitted + i + 1}. ${s}`));
+    return lines.join('\n').slice(0, 3500);
+  }
+
+  async flush() {
+    if (!this.dirty || !this.messageId) return;
+    const text = this.render();
+    this.dirty = false;
+    if (text === this.lastRendered) return;
+    this.lastRendered = text;
+    await this.ctx.api.editMessageText(this.chatId, this.messageId, text).catch(() => {});
+  }
+
+  async finish(ok) {
+    this.stop();
+    if (!this.messageId) return;
+    // 纯问答没有工具步骤 → 删掉进度消息保持干净
+    if (this.steps.length === 0) {
+      await this.ctx.api.deleteMessage(this.chatId, this.messageId).catch(() => {});
+      return;
+    }
+    const tailCount = Math.min(8, this.steps.length);
+    const startIndex = this.steps.length - tailCount;
+    const tail = this.steps.slice(startIndex).map((s, i) => `${startIndex + i + 1}. ${s}`);
+    const head = ok
+      ? `✅ cc 完成（共 ${this.steps.length} 步）`
+      : `⚠️ cc 结束（共 ${this.steps.length} 步，未完全成功）`;
+    await this.ctx.api
+      .editMessageText(this.chatId, this.messageId, [head, ...tail].join('\n').slice(0, 3500))
+      .catch(() => {});
+  }
+
+  async fail() {
+    this.stop();
+    if (!this.messageId) return;
+    await this.ctx.api
+      .editMessageText(this.chatId, this.messageId, `❌ cc 处理失败（共 ${this.steps.length} 步）`)
+      .catch(() => {});
+  }
+
+  stop() {
+    if (this.timer) {
+      clearInterval(this.timer);
+      this.timer = undefined;
+    }
+  }
+}
+
+// 跑一次 cc 请求：白名单 + 进度面板 + 调 claude + 回贴（文本和附件消息共用）
 async function runCc(ctx, prompt) {
   if (config.allowedUserIds.size === 0) {
     return ctx.reply('⚠️ 尚未配置白名单。请先发送 /ccwhoami 拿到你的 user_id，填入 .env 的 ALLOWED_USER_IDS 后重启我。');
@@ -175,20 +254,19 @@ async function runCc(ctx, prompt) {
   if (!prompt.trim()) return ctx.reply('你想让我做什么？在「cc:」后面写上内容。');
   if (isBusy(ctx.chat.id)) return ctx.reply('⏳ 上一个任务还在跑，请稍候。');
 
-  // 立刻回个占位（opus 冷启动可能要几十秒），出结果后删掉
-  const ack = await ctx.reply('🐾 收到，正在处理…').catch(() => null);
-  await ctx.replyWithChatAction('typing');
-  const typing = setInterval(() => ctx.replyWithChatAction('typing').catch(() => {}), 5000);
+  const progress = new ProgressReporter(ctx);
+  await progress.start();
 
   try {
-    const { text, isError } = await askClaude(ctx.chat.id, prompt);
-    if (ack) await ctx.api.deleteMessage(ctx.chat.id, ack.message_id).catch(() => {});
+    const { text, isError } = await askClaude(ctx.chat.id, prompt, (s) => progress.push(s));
+    await progress.finish(!isError);
     await reply(ctx, text || '(空)');
     if (isError) console.warn('[bot] claude 返回错误');
   } catch (e) {
+    await progress.fail();
     await ctx.reply(`❌ 处理出错：${e.message}`);
   } finally {
-    clearInterval(typing);
+    progress.stop();
   }
 }
 
