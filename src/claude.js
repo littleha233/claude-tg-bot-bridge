@@ -94,6 +94,12 @@ export function isBusy(chatId) {
   return busy.has(String(chatId));
 }
 
+// 告诉 claude 如何把本机文件发到群里（桥接层会拦截标记并上传）
+const FILE_INSTRUCTION =
+  '如果需要把本机文件（图片、二维码、截图、文档等）发送到当前 Telegram 对话，' +
+  '请在回复中单独写一行：[[file: 文件的绝对路径]]，系统会自动把该文件作为附件上传；' +
+  '也可以用 Markdown 图片语法 ![说明](绝对路径)。不要只贴本地路径让用户自己去找。';
+
 // 把 claude 的一次 tool_use 渲染成一行进度（给群里看）
 function shorten(value, n) {
   const s = String(value ?? '')
@@ -158,6 +164,8 @@ export function askClaude(chatId, prompt, onProgress) {
       config.permissionMode,
       '--model',
       getModel(chatId),
+      '--append-system-prompt',
+      FILE_INSTRUCTION,
     ];
     const prev = sessions[key];
     if (prev) args.push('--resume', prev);

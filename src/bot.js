@@ -1,7 +1,7 @@
-import { Bot } from 'grammy';
+import { Bot, InputFile } from 'grammy';
 import { HttpsProxyAgent } from 'https-proxy-agent';
 import { SocksProxyAgent } from 'socks-proxy-agent';
-import { createWriteStream, mkdirSync } from 'node:fs';
+import { createWriteStream, mkdirSync, existsSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import https from 'node:https';
@@ -163,6 +163,41 @@ bot.command('ccmodel', (ctx) => {
   );
 });
 
+// 从 claude 回复里提取要发送的本机文件：[[file: 路径]] 或 Markdown 图片 ![](路径)
+const IMAGE_EXT = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp']);
+function expandHomePath(p) {
+  if (p === '~') return process.env.HOME;
+  if (p.startsWith('~/')) return join(process.env.HOME, p.slice(2));
+  return p;
+}
+function extractAttachments(text) {
+  const files = [];
+  let cleaned = text;
+  const patterns = [/!\[[^\]]*\]\(\s*([^)]+?)\s*\)/g, /\[\[file:\s*([^\]]+?)\s*\]\]/g];
+  for (const re of patterns) {
+    cleaned = cleaned.replace(re, (match, captured) => {
+      const path = expandHomePath(captured.trim());
+      if (path.startsWith('/') && existsSync(path) && statSync(path).isFile()) {
+        files.push(path);
+        return '';
+      }
+      return match; // 不是本地文件（如 http 链接）就原样保留
+    });
+  }
+  return { text: cleaned.replace(/\n{3,}/g, '\n\n').trim(), files };
+}
+async function sendAttachments(ctx, files) {
+  for (const f of files) {
+    const ext = (f.match(/\.[^./]+$/)?.[0] || '').toLowerCase();
+    try {
+      if (IMAGE_EXT.has(ext)) await ctx.replyWithPhoto(new InputFile(f));
+      else await ctx.replyWithDocument(new InputFile(f));
+    } catch (e) {
+      await ctx.reply(`⚠️ 上传文件失败 ${f.split('/').pop()}：${e.message}`);
+    }
+  }
+}
+
 // 进度面板：把 claude 的执行步骤实时编辑进同一条消息（节流 2.5s），方便监督
 class ProgressReporter {
   constructor(ctx) {
@@ -260,7 +295,10 @@ async function runCc(ctx, prompt) {
   try {
     const { text, isError } = await askClaude(ctx.chat.id, prompt, (s) => progress.push(s));
     await progress.finish(!isError);
-    await reply(ctx, text || '(空)');
+    const { text: cleaned, files } = extractAttachments(text || '');
+    if (cleaned) await reply(ctx, cleaned);
+    else if (files.length === 0) await reply(ctx, '(空)');
+    await sendAttachments(ctx, files);
     if (isError) console.warn('[bot] claude 返回错误');
   } catch (e) {
     await progress.fail();
