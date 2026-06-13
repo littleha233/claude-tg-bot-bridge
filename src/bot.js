@@ -14,6 +14,7 @@ import {
   setWorkDir,
   getModel,
   setModel,
+  compactSession,
 } from './claude.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -42,6 +43,7 @@ bot.api.getMe().then((me) => {
 bot.api
   .setMyCommands([
     { command: 'ccnew', description: '清空上下文、开新会话' },
+    { command: 'cccompact', description: '压缩上下文（生成摘要、省 token）' },
     { command: 'ccproject', description: '切换工作目录（自动开新会话）' },
     { command: 'ccmodel', description: '切换模型 opus/sonnet/haiku' },
     { command: 'ccwhoami', description: '查看你的 ID' },
@@ -117,6 +119,7 @@ const HELP = [
   '我是 cc 🤖。命令都以 cc 开头：',
   '· 直接对我说话：「cc: 你的需求」（或 @我 / 回复我）',
   '· /ccnew —— 清空上下文、开新会话',
+  '· /cccompact —— 压缩上下文（生成摘要、省 token、保留主线）',
   '· /ccproject <路径> —— 切换工作目录（自动开新会话）',
   '· /ccmodel <opus|sonnet|haiku> —— 切换模型；不带参数查看当前',
   '· /ccwhoami —— 查看你的 ID',
@@ -128,6 +131,22 @@ bot.command('ccnew', (ctx) => {
   if (!authed(ctx)) return;
   resetSession(ctx.chat.id);
   ctx.reply('🆕 已开启新会话，之前的上下文已清空。');
+});
+
+// /cccompact：压缩上下文——生成摘要后清空长历史，摘要作为新会话背景
+bot.command('cccompact', async (ctx) => {
+  if (!authed(ctx)) return;
+  if (isBusy(ctx.chat.id)) return ctx.reply('⏳ 上一个任务还在跑，请稍候。');
+  const note = await ctx.reply('🗜 正在压缩上下文（生成摘要中，可能要十几秒）…').catch(() => null);
+  try {
+    const res = await compactSession(ctx.chat.id);
+    if (note) await ctx.api.deleteMessage(ctx.chat.id, note.message_id).catch(() => {});
+    if (!res.ok) return ctx.reply(`ℹ️ ${res.error}`);
+    await reply(ctx, `✅ 已压缩上下文：旧的长历史已清空，下面这份摘要会作为新会话的背景。\n\n📋 摘要：\n${res.summary}`);
+  } catch (e) {
+    if (note) await ctx.api.deleteMessage(ctx.chat.id, note.message_id).catch(() => {});
+    await ctx.reply(`❌ 压缩失败：${e.message}`);
+  }
 });
 
 // /ccproject <路径>：切换工作目录并开新会话；不带参数则显示当前目录

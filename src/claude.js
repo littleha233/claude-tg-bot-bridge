@@ -49,6 +49,14 @@ const sessions = loadJson(SESSIONS_FILE);
 const workdirs = loadJson(WORKDIRS_FILE);
 // chatId -> 模型：每个群可单独切换模型（别名或完整 id）
 const models = loadJson(MODELS_FILE);
+// chatId -> 压缩后的上下文摘要（内存即可）：下次开新会话时作为背景注入
+const pendingSeeds = {};
+
+// 让 claude 把当前会话浓缩成上下文摘要
+const COMPACT_PROMPT =
+  '请把我们到目前为止的对话和你做过的工作，浓缩成一份简洁但完整的「上下文摘要」，' +
+  '供开启新会话时作为背景。包含：核心目标/任务、关键决策与结论、当前进度与状态、' +
+  '待办事项、涉及的重要文件与路径、需要遵守的约定。只输出摘要本身，不要寒暄或多余解释。';
 
 export function resetSession(chatId) {
   delete sessions[String(chatId)];
@@ -170,6 +178,13 @@ export function askClaude(chatId, prompt, onProgress) {
     const prev = sessions[key];
     if (prev) args.push('--resume', prev);
 
+    // 开新会话且有压缩摘要 → 把摘要作为背景注入第一条消息
+    let effectivePrompt = prompt;
+    if (!prev && pendingSeeds[key]) {
+      effectivePrompt = `【上一段对话的上下文摘要，请作为背景记住】\n${pendingSeeds[key]}\n\n【用户新消息】\n${prompt}`;
+      delete pendingSeeds[key];
+    }
+
     const child = spawn('claude', args, {
       cwd: getWorkDir(chatId),
       env: childEnv,
@@ -241,7 +256,25 @@ export function askClaude(chatId, prompt, onProgress) {
     });
 
     // 通过 stdin 传 prompt，避免命令行参数转义问题
-    child.stdin.write(prompt);
+    child.stdin.write(effectivePrompt);
     child.stdin.end();
   });
+}
+
+/**
+ * 压缩当前会话：让 claude 生成上下文摘要 → 清掉旧会话 → 把摘要存为种子。
+ * 下一条消息会用这份摘要开新会话。返回 { ok, summary } 或 { ok:false, error }
+ */
+export async function compactSession(chatId, onProgress) {
+  const key = String(chatId);
+  if (!sessions[key]) {
+    return { ok: false, error: '当前没有进行中的会话，无需压缩（直接用 /ccnew 即可）。' };
+  }
+  const { text, isError } = await askClaude(chatId, COMPACT_PROMPT, onProgress);
+  if (isError || !text || !text.trim()) {
+    return { ok: false, error: '生成摘要失败，请稍后再试。' };
+  }
+  resetSession(chatId);
+  pendingSeeds[key] = text.trim();
+  return { ok: true, summary: text.trim() };
 }
