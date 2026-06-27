@@ -58,6 +58,14 @@ const COMPACT_PROMPT =
   '供开启新会话时作为背景。包含：核心目标/任务、关键决策与结论、当前进度与状态、' +
   '待办事项、涉及的重要文件与路径、需要遵守的约定。只输出摘要本身，不要寒暄或多余解释。';
 
+// 连接类瞬断（多为代理 7892 抖动）：跟 Anthropic 的连接中途断了，可自动重试一次。
+const TRANSIENT_API_ERROR =
+  /connection closed|connection error|connection reset|overloaded|too many requests|rate limit|internal server error|bad gateway|service unavailable|502|503|529|timeout|timed out|try again|econnreset|socket hang up|network|tls|ssl/i;
+
+// 重试时不重跑已完成的步骤，只让它基于现有进度把最终结果补出来。
+const RETRY_NUDGE =
+  '（上一次回答因为网络连接中断没有产出来。请基于你刚才已经完成的工作，直接给出最终结果/答复，不要从头重做一遍。）';
+
 export function resetSession(chatId) {
   delete sessions[String(chatId)];
   saveJson(SESSIONS_FILE, sessions);
@@ -144,25 +152,54 @@ function renderTool(block) {
       return `🌐 搜索 ${shorten(input.query, 60)}`;
     case 'TodoWrite':
       return '📋 更新待办';
+    case 'AskUserQuestion':
+      return '❓ 想向你确认一个问题';
     default:
       return `🔧 ${block.name}`;
   }
 }
 
 /**
- * 以 headless 方式调用 claude（stream-json 流式）。
+ * 公开入口：调用 claude，并在"连接类瞬断"时自动重试一次。
+ * busy 锁在这里持有，跨两次尝试，避免重试间隙被新消息抢占。
  * onProgress(step) 在每次工具调用时回调一次，用于推送进度。
  * 返回 { text, sessionId, isError }
  */
-export function askClaude(chatId, prompt, onProgress) {
+export async function askClaude(chatId, prompt, onProgress) {
+  const key = String(chatId);
+  if (busy.has(key)) {
+    return { text: '⏳ 上一个任务还在跑，请等它结束再发。', isError: true };
+  }
+  busy.add(key);
+  try {
+    const first = await runClaudeOnce(chatId, prompt, onProgress);
+    if (!(first.isError && first.retryable)) return first;
+
+    // 连接断了，但会话进度已保存 → resume 后让它把最终结果补出来，不重跑步骤
+    onProgress?.('🔁 连接中断，自动重试中…');
+    const second = await runClaudeOnce(chatId, RETRY_NUDGE, onProgress);
+    if (second.isError && second.retryable) {
+      // 接连断两次：给可操作的中文提示，别再甩英文原始报错
+      return {
+        ...second,
+        text:
+          '⚠️ 跟 Anthropic 的连接接连中断了（多半是代理 7892 抖动）。\n' +
+          '刚才的工作进度已经保存，等网络稳一点，直接回我「继续」就能接着跑。',
+      };
+    }
+    return second;
+  } finally {
+    busy.delete(key);
+  }
+}
+
+/**
+ * 以 headless 方式调用 claude（stream-json 流式）一次。
+ * 返回 { text, sessionId, isError, retryable }
+ */
+function runClaudeOnce(chatId, prompt, onProgress) {
   const key = String(chatId);
   return new Promise((resolve) => {
-    if (busy.has(key)) {
-      resolve({ text: '⏳ 上一个任务还在跑，请等它结束再发。', isError: true });
-      return;
-    }
-    busy.add(key);
-
     const args = [
       '-p',
       '--output-format',
@@ -232,27 +269,33 @@ export function askClaude(chatId, prompt, onProgress) {
     child.stderr.on('data', (d) => (stderr += d));
 
     child.on('error', (err) => {
-      busy.delete(key);
       resolve({ text: `❌ 启动 claude 失败：${err.message}`, isError: true });
     });
 
     child.on('close', (code) => {
-      busy.delete(key);
       if (buffer.trim()) handleLine(buffer);
       if (sessionId) {
         sessions[key] = sessionId;
         saveJson(SESSIONS_FILE, sessions);
       }
       if (!sawResult && code !== 0) {
-        // resume 失败（如 session 过期）等：清掉旧 session 让下次重来
-        if (prev) resetSession(chatId);
+        // 进程非正常退出。stderr 像连接类瞬断 → 标记可重试（且保留 session 以便 resume）；
+        // 否则多半是 resume 失败（session 过期）等 → 清掉旧 session 让下次重来。
+        const retryable = TRANSIENT_API_ERROR.test(stderr);
+        if (prev && !retryable) resetSession(chatId);
         resolve({
           text: `❌ claude 退出码 ${code}\n${stderr.slice(0, 1500)}`,
           isError: true,
+          retryable,
         });
         return;
       }
-      resolve({ text: resultText || '(claude 返回了空内容)', sessionId, isError });
+      resolve({
+        text: resultText || '(claude 返回了空内容)',
+        sessionId,
+        isError,
+        retryable: isError && TRANSIENT_API_ERROR.test(resultText),
+      });
     });
 
     // 通过 stdin 传 prompt，避免命令行参数转义问题
