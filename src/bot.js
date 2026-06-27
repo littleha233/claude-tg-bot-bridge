@@ -52,6 +52,17 @@ bot.api
   ])
   .catch((e) => console.error('[bot] 注册命令菜单失败:', e.message));
 
+// 消息里是否显式 @ 了"另一个 bot"（Telegram bot 用户名必以 bot 结尾，可精准识别、不误伤真人）。
+// 用于：当用户回复我、但其实是 @ 了别的 bot 来指派时，我应让位、不抢着处理。
+function mentionsOtherBot(text, selfUsername) {
+  const self = (selfUsername || '').toLowerCase();
+  const mentions = text.match(/@([a-z0-9_]+)/gi) || [];
+  return mentions.some((m) => {
+    const u = m.slice(1).toLowerCase();
+    return u.endsWith('bot') && u !== self;
+  });
+}
+
 // 判断这条消息是否在对 cc 说话，并返回去掉触发词后的纯 prompt；不是则返回 null
 function extractPrompt(ctx) {
   const msg = ctx.message;
@@ -72,8 +83,12 @@ function extractPrompt(ctx) {
   if (botUsername && lower.includes(`@${botUsername.toLowerCase()}`)) {
     return text.replace(new RegExp(`@${botUsername}`, 'ig'), '').trim();
   }
-  // 3) 回复机器人自己的消息
-  if (msg.reply_to_message?.from?.username === botUsername) return text;
+  // 3) 回复机器人自己的消息——但若消息里显式 @ 了别的 bot，则让位（用户在指派那个 bot，
+  //    回复我只是为了引用上下文，不该被当成在叫我）。
+  if (msg.reply_to_message?.from?.username === botUsername) {
+    if (mentionsOtherBot(text, botUsername)) return null;
+    return text;
+  }
   // 4) 私聊（非群组）里直接说话
   if (ctx.chat.type === 'private') return text;
 
