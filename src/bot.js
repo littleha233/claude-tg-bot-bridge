@@ -16,6 +16,7 @@ import {
   setModel,
   compactSession,
 } from './claude.js';
+import { mdToTelegramHtml, stripMarkdown, chunkByLine } from './format.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DOWNLOAD_DIR = join(__dirname, '..', 'data', 'downloads');
@@ -79,27 +80,28 @@ function extractPrompt(ctx) {
   return null;
 }
 
-// Telegram 单条消息上限 4096，按行切成多段发送
+// Telegram 单条消息上限 4096。把 Markdown 渲染成 Telegram HTML（加粗/标题/代码块/表格…）
+// 再发；万一某段 HTML 解析失败（极少数转换边角），自动退回去标记的纯文本，保证一定发得出去。
 async function reply(ctx, text) {
-  const LIMIT = 3800;
-  const chunks = [];
-  let buf = '';
-  for (const line of text.split('\n')) {
-    if (buf.length + line.length + 1 > LIMIT) {
-      if (buf) chunks.push(buf);
-      // 单行过长则硬切
-      if (line.length > LIMIT) {
-        for (let i = 0; i < line.length; i += LIMIT) chunks.push(line.slice(i, i + LIMIT));
-        buf = '';
-      } else {
-        buf = line;
+  // 常见短回复整条发；超长才按源码行切，保证每段 HTML 标签自洽
+  const chunks = mdToTelegramHtml(text).length <= 3900 ? [text] : chunkByLine(text, 3200);
+  for (const chunk of chunks) {
+    const html = mdToTelegramHtml(chunk);
+    if (!html) continue;
+    try {
+      await ctx.reply(html, {
+        parse_mode: 'HTML',
+        link_preview_options: { is_disabled: true },
+      });
+    } catch (e) {
+      console.warn('[bot] HTML 渲染发送失败，退回纯文本:', e.message);
+      try {
+        await ctx.reply(stripMarkdown(chunk));
+      } catch {
+        await ctx.reply(chunk).catch(() => {});
       }
-    } else {
-      buf = buf ? `${buf}\n${line}` : line;
     }
   }
-  if (buf) chunks.push(buf);
-  for (const c of chunks) await ctx.reply(c);
 }
 
 // 只放行白名单用户，未授权静默忽略
